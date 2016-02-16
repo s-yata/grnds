@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-//	"sync"
+	"sync"
 //	"time"
 
 	"github.com/groonga/grnci"
@@ -82,13 +82,55 @@ func (db *DB) makeEmptyResponses(vals interface{}) ([]reflect.Value, error) {
 }
 
 func (db *DB) selectWithoutSortby(tbl string, vals interface{}, options *grnci.SelectOptions, sortby []string) (int, error) {
-	// TODO: adjust options.
+	// Adjust --offset and --limit.
+	if options.Offset < 0 {
+		return 0, fmt.Errorf("invalid offset: offset = %d", options.Offset)
+	}
+	localOptions := *options
+	if options.Limit > 0 {
+		localOptions.Limit += options.Offset
+	}
+	localOptions.Offset = 0
 
-	// TODO: execute `select` in parallel.
+	// Execute `select` in parallel.
+	var wg sync.WaitGroup
+	wg.Add(len(db.dbs))
+	ns := make([]int, len(db.dbs))
+	resps, err := db.makeEmptyResponses(vals)
+	if err != nil {
+		return 0, err
+	}
+	errs := make([]error, len(db.dbs))
+	for i, _ := range db.dbs {
+		go func(i int) {
+			ns[i], errs[i] = db.dbs[i].Select(tbl, resps[i].Interface(), &localOptions)
+			wg.Done()
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return 0, err
+		}
+	}
 
-	// TODO: merge the responses.
-
-	return 0, nil
+	// Merge the responses.
+	outN := 0
+	outRecs := reflect.ValueOf(vals).Elem()
+	for i := 0; i < len(db.dbs); i++ {
+		outN += ns[i]
+		outRecs = reflect.AppendSlice(outRecs, resps[i].Elem())
+	}
+	if options.Offset < outRecs.Len() {
+		outRecs = outRecs.Slice(options.Offset, outRecs.Len())
+	} else {
+		outRecs = outRecs.Slice(outRecs.Len(), outRecs.Len())
+	}
+	if (options.Limit >= 0) && (options.Limit < outRecs.Len()) {
+		outRecs = outRecs.Slice(0, options.Limit)
+	}
+	reflect.ValueOf(vals).Elem().Set(outRecs)
+	return outN, nil
 }
 
 func (db *DB) selectWithSortby(tbl string, vals interface{}, options *grnci.SelectOptions, sortby []string) (int, error) {
@@ -102,6 +144,9 @@ func (db *DB) selectWithSortby(tbl string, vals interface{}, options *grnci.Sele
 }
 
 func (db *DB) Select(tbl string, vals interface{}, options *grnci.SelectOptions) (int, error) {
+	if options == nil {
+		options = grnci.NewSelectOptions()
+	}
 	sortby := splitValues(options.Sortby, ',')
 	if len(sortby) == 0 {
 		return db.selectWithoutSortby(tbl, vals, options, sortby)
@@ -113,51 +158,6 @@ func (db *DB) Select(tbl string, vals interface{}, options *grnci.SelectOptions)
 //type Resp struct {
 //	N    int
 //	Recs []Rec
-//}
-
-//func selectWithoutSortby(dbs []*grnci.DB, options grnci.SelectOptions) (outN int, outRecs []Rec) {
-//	// Adjust --offset and --limit.
-//	offset := options.Offset
-//	limit := options.Limit
-//	if offset < 0 {
-//		log.Fatal("negative offset is not supported")
-//	}
-//	if limit > 0 {
-//		options.Limit += offset
-//	}
-//	options.Offset = 0
-
-//	// Execute `select` in parallel.
-//	var wg sync.WaitGroup
-//	wg.Add(len(dbs))
-//	resps := make([]Resp, len(dbs))
-//	for i, _ := range dbs {
-//		go func(i int) {
-//			var recs []Rec
-//			n, err := dbs[i].Select("Page", &recs, &options)
-//			if err != nil {
-//				log.Fatal("grnci.DB.Select() failed: ", err)
-//			}
-//			resps[i] = Resp{n, recs}
-//			wg.Done()
-//		}(i)
-//	}
-//	wg.Wait()
-
-//	// Merge the responses.
-//	for _, resp := range resps {
-//		outN += resp.N
-//		outRecs = append(outRecs, resp.Recs...)
-//	}
-//	if offset < len(outRecs) {
-//		outRecs = outRecs[offset:]
-//	} else {
-//		outRecs = outRecs[len(outRecs):]
-//	}
-//	if (limit >= 0) && (limit < len(outRecs)) {
-//		outRecs = outRecs[:limit]
-//	}
-//	return
 //}
 
 //type Cond struct {
